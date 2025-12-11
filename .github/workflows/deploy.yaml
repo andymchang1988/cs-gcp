@@ -21,13 +21,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # -----------------------------------------
+    # 1. CHECKOUT
+    # -----------------------------------------
     - name: Checkout repository
       uses: actions/checkout@v3
 
     # -----------------------------------------
-    # OIDC → WIF → ADC Authentication to GCP
+    # 2. GOOGLE AUTH (OIDC → WIF → ADC)
     # -----------------------------------------
-    - name: Authenticate to Google Cloud (OIDC)
+    - name: Authenticate to Google Cloud (OIDC WIF)
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -35,7 +38,7 @@ jobs:
         token_format: "access_token"
 
     # -----------------------------------------
-    # Install gcloud
+    # 3. CLOUD SDK + kubectl
     # -----------------------------------------
     - name: Install gcloud SDK
       uses: google-github-actions/setup-gcloud@v2
@@ -44,22 +47,22 @@ jobs:
         components: kubectl
 
     # -----------------------------------------
-    # Enable gcloud-based exec plugin for kubectl
+    # 4. Enable gcloud exec authentication for kubectl
     # -----------------------------------------
-    - name: Configure Kubernetes auth via gcloud exec plugin
+    - name: Configure gcloud exec-auth plugin
       run: |
         echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${GOOGLE_GHA_CREDS_PATH}" >> $GITHUB_ENV
         echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
         gcloud info
 
     # -----------------------------------------
-    # Docker auth for Artifact Registry
+    # 5. DOCKER AUTH FOR ARTIFACT REGISTRY
     # -----------------------------------------
     - name: Configure Docker authentication
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
     # -----------------------------------------
-    # Build image
+    # 6. BUILD IMAGE
     # -----------------------------------------
     - name: Build Docker image
       run: |
@@ -68,21 +71,46 @@ jobs:
         docker build -t $IMAGE ./app
 
     # -----------------------------------------
-    # Push image
+    # 7. PUSH IMAGE
     # -----------------------------------------
-    - name: Push image
+    - name: Push image to Artifact Registry
       run: docker push $IMAGE
 
     # -----------------------------------------
-    # Get GKE credentials
+    # 8. FETCH GKE CREDENTIALS
     # -----------------------------------------
     - name: Get GKE credentials
       run: |
         USE_GKE_GCLOUD_AUTH_PLUGIN=True \
         gcloud container clusters get-credentials $CLUSTER --region $REGION
+        ls -la ~/.kube || true
 
     # -----------------------------------------
-    # Deploy to Staging
+    # 9. PATCH kubeconfig to REMOVE gke-gcloud-auth-plugin
+    #    AND replace it with gcloud exec plugin
+    # -----------------------------------------
+    - name: Patch kubeconfig to use gcloud exec plugin
+      run: |
+        KCFG="$HOME/.kube/config"
+        echo "Patching kubeconfig located at: $KCFG"
+
+        # Replace the missing plugin with gcloud
+        sed -i 's/gke-gcloud-auth-plugin/gcloud/' "$KCFG"
+
+        # Remove old auth-provider blocks if present
+        sed -i '/auth-provider:/,+6d' "$KCFG" || true
+
+        echo "--- kubeconfig after patch ---"
+        cat "$KCFG"
+
+    # -----------------------------------------
+    # 10. TEST CLUSTER CONNECTION
+    # -----------------------------------------
+    - name: Validate kubectl authentication
+      run: kubectl get nodes --request-timeout=20s
+
+    # -----------------------------------------
+    # 11. DEPLOY TO STAGING
     # -----------------------------------------
     - name: Deploy to Staging
       if: github.ref == 'refs/heads/staging'
@@ -91,7 +119,7 @@ jobs:
         kubectl rollout status deployment/nginx-staging
 
     # -----------------------------------------
-    # Deploy to Prod
+    # 12. DEPLOY TO PRODUCTION
     # -----------------------------------------
     - name: Deploy to Prod
       if: github.ref == 'refs/heads/main'
