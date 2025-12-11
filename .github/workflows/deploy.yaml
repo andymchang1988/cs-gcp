@@ -6,6 +6,10 @@ on:
       - staging
       - main
 
+permissions:
+  contents: read
+  id-token: write
+
 env:
   PROJECT_ID: sanguine-rhythm-477418-t9
   REGION: us-east4
@@ -20,7 +24,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Authenticate to GCP (Workload Identity Federation)
+    - name: Authenticate to GCP (OIDC)
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
