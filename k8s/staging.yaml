@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nginx-staging
+  namespace: staging
 spec:
   replicas: 1
   selector:
@@ -15,20 +16,21 @@ spec:
       containers:
       - name: nginx
         image: REPLACE_IMAGE
-        env:
-        - name: ENV_MESSAGE
-          value: "Hello from Staging!"
         ports:
         - containerPort: 80
+        env:
+        - name: ENVIRONMENT
+          value: "staging"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: nginx-staging
+  namespace: staging
 spec:
-  type: LoadBalancer
   selector:
     app: nginx-staging
+  type: LoadBalancer
   ports:
-  - port: 80
-    targetPort: 80
+    - port: 80
+      targetPort: 80
