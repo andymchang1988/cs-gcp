@@ -6,6 +6,11 @@ on:
       - staging
       - main
 
+# REQUIRED for google-github-actions/auth to get OIDC tokens
+permissions:
+  id-token: write
+  contents: read
+
 env:
   PROJECT_ID: sanguine-rhythm-477418-t9
   REGION: us-east4
@@ -19,24 +24,26 @@ jobs:
 
     steps:
     # ------------------------------------------------------------
-    # 0. CHECKOUT CODE
+    # 1. Checkout code
     # ------------------------------------------------------------
     - name: Checkout repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     # ------------------------------------------------------------
-    # 1. AUTH TO GCP (WIF)
+    # 2. Authenticate to Google Cloud via Workload Identity Federation
+    #    Secrets required in repo:
+    #      WIF_PROVIDER       = projects/PROJECT_NUM/locations/global/workloadIdentityPools/oidc-github-pool/providers/github-provider
+    #      WIF_SERVICE_ACCOUNT = github-deployer@PROJECT_ID.iam.gserviceaccount.com
     # ------------------------------------------------------------
     - name: Authenticate to Google Cloud
       id: auth
       uses: google-github-actions/auth@v2
       with:
-        token_format: "access_token"
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
     # ------------------------------------------------------------
-    # 2. INSTALL gcloud + GKE AUTH PLUGIN
+    # 3. Install gcloud SDK + GKE auth plugin
     # ------------------------------------------------------------
     - name: Install gcloud SDK
       uses: google-github-actions/setup-gcloud@v2
@@ -45,68 +52,52 @@ jobs:
         install_components: "gke-gcloud-auth-plugin"
 
     # ------------------------------------------------------------
-    # 3. INSTALL yq v4 CLEANLY (FIXES ALL ERRORS)
+    # 4. Configure docker to push to Artifact Registry
     # ------------------------------------------------------------
-    - name: Install correct yq v4
-      run: |
-        echo "Removing old yq versions..."
-        sudo rm -f /usr/bin/yq || true
-        sudo rm -f /usr/local/bin/yq || true
-        sudo rm -f /snap/bin/yq || true
-
-        echo "Installing yq 4.x..."
-        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
-          -O /usr/local/bin/yq
-        sudo chmod +x /usr/local/bin/yq
-
-        echo "yq version:"
-        yq --version
-
-    # ------------------------------------------------------------
-    # 4. AUTH DOCKER FOR ARTIFACT REGISTRY
-    # ------------------------------------------------------------
-    - name: Configure docker auth for Artifact Registry
+    - name: Configure Docker auth for Artifact Registry
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
     # ------------------------------------------------------------
-    # 5. BUILD DOCKER IMAGE
+    # 5. Build Docker image
     # ------------------------------------------------------------
     - name: Build Docker image
       run: |
         IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-        docker build -t $IMAGE ./app
+        docker build -t "$IMAGE" ./app
 
     # ------------------------------------------------------------
-    # 6. PUSH DOCKER IMAGE TO ARTIFACT REGISTRY
+    # 6. Push Docker image
     # ------------------------------------------------------------
-    - name: Push Docker Image
+    - name: Push Docker image
       run: docker push "$IMAGE"
 
     # ------------------------------------------------------------
-    # 7. GET GKE CREDENTIALS
+    # 7. Get GKE credentials
     # ------------------------------------------------------------
     - name: Get GKE credentials
       run: |
-        gcloud container clusters get-credentials $CLUSTER --region $REGION
-        kubectl version --client
+        gcloud container clusters get-credentials "$CLUSTER" --region "$REGION"
+        kubectl get nodes --request-timeout=20s
 
     # ------------------------------------------------------------
-    # 8. DEPLOY TO STAGING
+    # 8. Deploy to STAGING on 'staging' branch
     # ------------------------------------------------------------
     - name: Deploy to STAGING
       if: github.ref == 'refs/heads/staging'
       run: |
         echo "Deploying STAGING with IMAGE=$IMAGE"
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
-        kubectl rollout status deployment/nginx-staging
+        kubectl rollout status deployment/nginx-staging -n staging --timeout=120s
+        kubectl get svc -n staging
 
     # ------------------------------------------------------------
-    # 9. DEPLOY TO PROD
+    # 9. Deploy to PROD on 'main' branch
     # ------------------------------------------------------------
     - name: Deploy to PROD
       if: github.ref == 'refs/heads/main'
       run: |
         echo "Deploying PROD with IMAGE=$IMAGE"
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
-        kubectl rollout status deployment/nginx-prod
+        kubectl rollout status deployment/nginx-prod -n prod --timeout=120s
+        kubectl get svc -n prod
