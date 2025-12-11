@@ -44,6 +44,18 @@ jobs:
 
     - name: Push image
       run: docker push $IMAGE
+      
+    - name: Configure gcloud
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Install GKE Auth Plugin
+      run: |
+        pip install --upgrade google-auth google-auth-oauthlib google-auth-httplib2
+        pip install --upgrade gke-gcloud-auth-plugin
+        echo "export USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+
+    - name: Get GKE credentials
+      run: gcloud container clusters get-credentials $CLUSTER --region $REGION
 
     - name: Get GKE credentials
       run: gcloud container clusters get-credentials $CLUSTER --region $REGION
