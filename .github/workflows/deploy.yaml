@@ -92,8 +92,19 @@ jobs:
       if: github.ref == 'refs/heads/staging'
       run: |
         echo "Deploying STAGING with IMAGE=$IMAGE"
+
+        # Apply manifest
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
+
+        echo "Waiting for Deployment object to appear..."
+        for i in {1..20}; do
+          kubectl get deployment nginx-staging -n staging && break
+          sleep 2
+        done
+
+        echo "Waiting for rollout..."
         kubectl rollout status deployment/nginx-staging -n staging --timeout=120s
+
         kubectl get svc -n staging
 
     # ------------------------------------------------------------
@@ -103,6 +114,17 @@ jobs:
       if: github.ref == 'refs/heads/main'
       run: |
         echo "Deploying PROD with IMAGE=$IMAGE"
+
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
+
+        echo "Waiting for Deployment object to appear..."
+        for i in {1..20}; do
+          kubectl get deployment nginx-prod -n prod && break
+          sleep 2
+        done
+
+        echo "Waiting for rollout..."
         kubectl rollout status deployment/nginx-prod -n prod --timeout=120s
+
         kubectl get svc -n prod
+
