@@ -89,23 +89,24 @@ jobs:
     # 9. PATCH kubeconfig to REMOVE gke-gcloud-auth-plugin
     #    AND replace it with gcloud exec plugin
     # -----------------------------------------
-    - name: Fix kubeconfig authentication for GKE
+    - name: Fix kubeconfig for GKE (correct ExecCredential JSON output)
       run: |
+        sudo apt-get install -y yq
         KCFG="$HOME/.kube/config"
-        echo "Cleaning existing auth sections..."
-        
-        # Remove broken exec or auth-provider blocks
+
+        # Remove invalid entries
         yq -i 'del(.users[].user."auth-provider")' "$KCFG"
         yq -i 'del(.users[].user.exec)' "$KCFG"
 
-        echo "Rewriting exec auth plugin..."
+        # Insert proper exec-based OIDC token generator
         yq -i '
           .users[].user.exec = {
             "apiVersion": "client.authentication.k8s.io/v1beta1",
             "command": "gcloud",
             "args": [
               "auth",
-              "print-access-token"
+              "print-access-token",
+              "--format=json"
             ],
             "env": [
               {
@@ -116,8 +117,9 @@ jobs:
           }
         ' "$KCFG"
 
-        echo "Final kubeconfig:"
+        echo "--- Updated kubeconfig ---"
         cat "$KCFG"
+
 
 
     # -----------------------------------------
