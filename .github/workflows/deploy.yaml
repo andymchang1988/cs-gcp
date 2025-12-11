@@ -21,15 +21,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # -------------------------
-    # 1. CHECKOUT CODE
-    # -------------------------
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    # -------------------------
-    # 2. AUTH TO GOOGLE CLOUD (OIDC → ADC)
-    # -------------------------
+    # -----------------------------------------
+    # OIDC → WIF → ADC Authentication to GCP
+    # -----------------------------------------
     - name: Authenticate to Google Cloud (OIDC)
       uses: google-github-actions/auth@v2
       with:
@@ -37,65 +34,66 @@ jobs:
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
         token_format: "access_token"
 
-    # -------------------------
-    # 3. INSTALL CLOUD SDK
-    # -------------------------
+    # -----------------------------------------
+    # Install gcloud
+    # -----------------------------------------
     - name: Install gcloud SDK
       uses: google-github-actions/setup-gcloud@v2
       with:
-        install_components: true
+        version: latest
+        components: kubectl
 
-    # -------------------------
-    # 4. ENABLE ADC FOR KUBECTL AUTH
-    # -------------------------
+    # -----------------------------------------
+    # Enable gcloud-based exec plugin for kubectl
+    # -----------------------------------------
     - name: Configure Kubernetes auth via gcloud exec plugin
       run: |
         echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${GOOGLE_GHA_CREDS_PATH}" >> $GITHUB_ENV
         echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
         gcloud info
 
-    # -------------------------
-    # 5. CONFIGURE DOCKER AUTH
-    # -------------------------
-    - name: Configure Docker to use Artifact Registry
+    # -----------------------------------------
+    # Docker auth for Artifact Registry
+    # -----------------------------------------
+    - name: Configure Docker authentication
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
-    # -------------------------
-    # 6. BUILD DOCKER IMAGE
-    # -------------------------
+    # -----------------------------------------
+    # Build image
+    # -----------------------------------------
     - name: Build Docker image
       run: |
         IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
         docker build -t $IMAGE ./app
 
-    # -------------------------
-    # 7. PUSH IMAGE
-    # -------------------------
-    - name: Push image to Artifact Registry
+    # -----------------------------------------
+    # Push image
+    # -----------------------------------------
+    - name: Push image
       run: docker push $IMAGE
 
-    # -------------------------
-    # 8. GET GKE CREDENTIALS (USING NEW EXEC-AUTH)
-    # -------------------------
+    # -----------------------------------------
+    # Get GKE credentials
+    # -----------------------------------------
     - name: Get GKE credentials
       run: |
         USE_GKE_GCLOUD_AUTH_PLUGIN=True \
         gcloud container clusters get-credentials $CLUSTER --region $REGION
 
-    # -------------------------
-    # 9. DEPLOY TO STAGING
-    # -------------------------
+    # -----------------------------------------
+    # Deploy to Staging
+    # -----------------------------------------
     - name: Deploy to Staging
       if: github.ref == 'refs/heads/staging'
       run: |
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
         kubectl rollout status deployment/nginx-staging
 
-    # -------------------------
-    # 10. DEPLOY TO PRODUCTION
-    # -------------------------
-    - name: Deploy to Production
+    # -----------------------------------------
+    # Deploy to Prod
+    # -----------------------------------------
+    - name: Deploy to Prod
       if: github.ref == 'refs/heads/main'
       run: |
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
