@@ -89,19 +89,36 @@ jobs:
     # 9. PATCH kubeconfig to REMOVE gke-gcloud-auth-plugin
     #    AND replace it with gcloud exec plugin
     # -----------------------------------------
-    - name: Patch kubeconfig to use gcloud exec plugin
+    - name: Fix kubeconfig authentication for GKE
       run: |
         KCFG="$HOME/.kube/config"
-        echo "Patching kubeconfig located at: $KCFG"
+        echo "Cleaning existing auth sections..."
+        
+        # Remove broken exec or auth-provider blocks
+        yq -i 'del(.users[].user."auth-provider")' "$KCFG"
+        yq -i 'del(.users[].user.exec)' "$KCFG"
 
-        # Replace the missing plugin with gcloud
-        sed -i 's/gke-gcloud-auth-plugin/gcloud/' "$KCFG"
+        echo "Rewriting exec auth plugin..."
+        yq -i '
+          .users[].user.exec = {
+            "apiVersion": "client.authentication.k8s.io/v1beta1",
+            "command": "gcloud",
+            "args": [
+              "auth",
+              "print-access-token"
+            ],
+            "env": [
+              {
+                "name": "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+                "value": strenv(GOOGLE_GHA_CREDS_PATH)
+              }
+            ]
+          }
+        ' "$KCFG"
 
-        # Remove old auth-provider blocks if present
-        sed -i '/auth-provider:/,+6d' "$KCFG" || true
-
-        echo "--- kubeconfig after patch ---"
+        echo "Final kubeconfig:"
         cat "$KCFG"
+
 
     # -----------------------------------------
     # 10. TEST CLUSTER CONNECTION
