@@ -6,151 +6,107 @@ on:
       - staging
       - main
 
-permissions:
-  contents: read
-  id-token: write
-
 env:
   PROJECT_ID: sanguine-rhythm-477418-t9
   REGION: us-east4
   REPO: nginx-gke-repo
   CLUSTER: nginx-gke-cicd
+  USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    # -----------------------------------------
-    # 1. CHECKOUT
-    # -----------------------------------------
-    - name: Checkout repository
+    # ------------------------------------------------------------
+    # 0. CHECKOUT CODE
+    # ------------------------------------------------------------
+    - name: Checkout repo
       uses: actions/checkout@v3
 
-    # -----------------------------------------
-    # 2. GOOGLE AUTH (OIDC → WIF → ADC)
-    # -----------------------------------------
-    - name: Authenticate to Google Cloud (OIDC WIF)
+    # ------------------------------------------------------------
+    # 1. AUTH TO GCP (WIF)
+    # ------------------------------------------------------------
+    - name: Authenticate to Google Cloud
+      id: auth
       uses: google-github-actions/auth@v2
       with:
+        token_format: "access_token"
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-        token_format: "access_token"
 
-    # -----------------------------------------
-    # 3. CLOUD SDK + kubectl
-    # -----------------------------------------
+    # ------------------------------------------------------------
+    # 2. INSTALL gcloud + GKE AUTH PLUGIN
+    # ------------------------------------------------------------
     - name: Install gcloud SDK
       uses: google-github-actions/setup-gcloud@v2
       with:
-        version: latest
-        components: kubectl
+        version: "latest"
+        install_components: "gke-gcloud-auth-plugin"
 
-    # -----------------------------------------
-    # 4. Enable gcloud exec authentication for kubectl
-    # -----------------------------------------
-    - name: Configure gcloud exec-auth plugin
+    # ------------------------------------------------------------
+    # 3. INSTALL yq v4 CLEANLY (FIXES ALL ERRORS)
+    # ------------------------------------------------------------
+    - name: Install correct yq v4
       run: |
-        echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=${GOOGLE_GHA_CREDS_PATH}" >> $GITHUB_ENV
-        echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
-        gcloud info
+        echo "Removing old yq versions..."
+        sudo rm -f /usr/bin/yq || true
+        sudo rm -f /usr/local/bin/yq || true
+        sudo rm -f /snap/bin/yq || true
 
-    # -----------------------------------------
-    # 5. DOCKER AUTH FOR ARTIFACT REGISTRY
-    # -----------------------------------------
-    - name: Configure Docker authentication
+        echo "Installing yq 4.x..."
+        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+          -O /usr/local/bin/yq
+        sudo chmod +x /usr/local/bin/yq
+
+        echo "yq version:"
+        yq --version
+
+    # ------------------------------------------------------------
+    # 4. AUTH DOCKER FOR ARTIFACT REGISTRY
+    # ------------------------------------------------------------
+    - name: Configure docker auth for Artifact Registry
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
-    # -----------------------------------------
-    # 6. BUILD IMAGE
-    # -----------------------------------------
+    # ------------------------------------------------------------
+    # 5. BUILD DOCKER IMAGE
+    # ------------------------------------------------------------
     - name: Build Docker image
       run: |
         IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
         docker build -t $IMAGE ./app
 
-    # -----------------------------------------
-    # 7. PUSH IMAGE
-    # -----------------------------------------
-    - name: Push image to Artifact Registry
-      run: docker push $IMAGE
+    # ------------------------------------------------------------
+    # 6. PUSH DOCKER IMAGE TO ARTIFACT REGISTRY
+    # ------------------------------------------------------------
+    - name: Push Docker Image
+      run: docker push "$IMAGE"
 
-    # -----------------------------------------
-    # 8. FETCH GKE CREDENTIALS
-    # -----------------------------------------
+    # ------------------------------------------------------------
+    # 7. GET GKE CREDENTIALS
+    # ------------------------------------------------------------
     - name: Get GKE credentials
       run: |
-        USE_GKE_GCLOUD_AUTH_PLUGIN=True \
         gcloud container clusters get-credentials $CLUSTER --region $REGION
-        ls -la ~/.kube || true
-   
-    # -----------------------------------------
-    # 8a. yq INSTALL
-    # -----------------------------------------
-    - name: Install yq v4 (correct version)
-      run: |
-        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
-        sudo chmod +x /usr/bin/yq
-        yq --version
+        kubectl version --client
 
-    # -----------------------------------------
-    # 9. PATCH kubeconfig to REMOVE gke-gcloud-auth-plugin
-    #    AND replace it with gcloud exec plugin
-    # -----------------------------------------
-    - name: Fix kubeconfig for GKE (correct ExecCredential JSON output)
-      run: |
-        sudo apt-get install -y yq
-        KCFG="$HOME/.kube/config"
-
-        # Remove invalid entries
-        yq -i 'del(.users[].user."auth-provider")' "$KCFG"
-        yq -i 'del(.users[].user.exec)' "$KCFG"
-
-        # Insert proper exec-based OIDC token generator
-        yq -i '
-          .users[].user.exec = {
-            "apiVersion": "client.authentication.k8s.io/v1beta1",
-            "command": "gcloud",
-            "args": [
-              "auth",
-              "print-access-token",
-              "--format=json"
-            ],
-            "env": [
-              {
-                "name": "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
-                "value": strenv(GOOGLE_GHA_CREDS_PATH)
-              }
-            ]
-          }
-        ' "$KCFG"
-
-        echo "--- Updated kubeconfig ---"
-        cat "$KCFG"
-
-
-
-    # -----------------------------------------
-    # 10. TEST CLUSTER CONNECTION
-    # -----------------------------------------
-    - name: Validate kubectl authentication
-      run: kubectl get nodes --request-timeout=20s
-
-    # -----------------------------------------
-    # 11. DEPLOY TO STAGING
-    # -----------------------------------------
-    - name: Deploy to Staging
+    # ------------------------------------------------------------
+    # 8. DEPLOY TO STAGING
+    # ------------------------------------------------------------
+    - name: Deploy to STAGING
       if: github.ref == 'refs/heads/staging'
       run: |
+        echo "Deploying STAGING with IMAGE=$IMAGE"
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
         kubectl rollout status deployment/nginx-staging
 
-    # -----------------------------------------
-    # 12. DEPLOY TO PRODUCTION
-    # -----------------------------------------
-    - name: Deploy to Prod
+    # ------------------------------------------------------------
+    # 9. DEPLOY TO PROD
+    # ------------------------------------------------------------
+    - name: Deploy to PROD
       if: github.ref == 'refs/heads/main'
       run: |
+        echo "Deploying PROD with IMAGE=$IMAGE"
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
         kubectl rollout status deployment/nginx-prod
