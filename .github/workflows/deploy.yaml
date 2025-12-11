@@ -6,125 +6,90 @@ on:
       - staging
       - main
 
-# REQUIRED for google-github-actions/auth to get OIDC tokens
-permissions:
-  id-token: write
-  contents: read
-
 env:
   PROJECT_ID: sanguine-rhythm-477418-t9
   REGION: us-east4
   REPO: nginx-gke-repo
   CLUSTER: nginx-gke-cicd
-  USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
 
 jobs:
   build-and-deploy:
+    permissions:
+      contents: read
+      id-token: write     # REQUIRED FOR OIDC
+
     runs-on: ubuntu-latest
 
     steps:
-    # ------------------------------------------------------------
-    # 1. Checkout code
-    # ------------------------------------------------------------
-    - name: Checkout repo
-      uses: actions/checkout@v4
 
-    # ------------------------------------------------------------
-    # 2. Authenticate to Google Cloud via Workload Identity Federation
-    #    Secrets required in repo:
-    #      WIF_PROVIDER       = projects/PROJECT_NUM/locations/global/workloadIdentityPools/oidc-github-pool/providers/github-provider
-    #      WIF_SERVICE_ACCOUNT = github-deployer@PROJECT_ID.iam.gserviceaccount.com
-    # ------------------------------------------------------------
+    - name: Checkout
+      uses: actions/checkout@v3
+
     - name: Authenticate to Google Cloud
-      id: auth
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-    # ------------------------------------------------------------
-    # 3. Install gcloud SDK + GKE auth plugin
-    # ------------------------------------------------------------
-    - name: Install gcloud SDK
+    - name: Install gcloud & GKE auth plugin
       uses: google-github-actions/setup-gcloud@v2
       with:
-        version: "latest"
-        install_components: "gke-gcloud-auth-plugin"
+        install_components: gke-gcloud-auth-plugin
 
-    # ------------------------------------------------------------
-    # 4. Configure docker to push to Artifact Registry
-    # ------------------------------------------------------------
-    - name: Configure Docker auth for Artifact Registry
+    - name: Configure Docker auth
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
-    # ------------------------------------------------------------
-    # 5. Build Docker image
-    # ------------------------------------------------------------
+    # --------------------------- BUILD IMAGE ---------------------------
+
     - name: Build Docker image
       run: |
         IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
         docker build -t "$IMAGE" ./app
 
-    # ------------------------------------------------------------
-    # 6. Push Docker image
-    # ------------------------------------------------------------
-    - name: Push Docker image
+    - name: Push image
       run: docker push "$IMAGE"
 
-    # ------------------------------------------------------------
-    # 7. Get GKE credentials
-    # ------------------------------------------------------------
-    - name: Get GKE credentials
+    # --------------------------- CONNECT TO GKE ---------------------------
+
+    - name: Get GKE Credentials
       run: |
-        gcloud container clusters get-credentials "$CLUSTER" --region "$REGION"
-        kubectl get nodes --request-timeout=20s
+        gcloud container clusters get-credentials "$CLUSTER" \
+          --region "$REGION"
+      env:
+        USE_GKE_GCLOUD_AUTH_PLUGIN: True
 
     - name: Ensure namespaces exist
       run: |
-        kubectl get ns staging || kubectl create ns staging
-        kubectl get ns prod || kubectl create ns prod
+        kubectl create ns staging --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create ns prod --dry-run=client -o yaml | kubectl apply -f -
 
-    # ------------------------------------------------------------
-    # 8. Deploy to STAGING on 'staging' branch
-    # ------------------------------------------------------------
+    # --------------------------- DEPLOY STAGING ---------------------------
+
     - name: Deploy to STAGING
       if: github.ref == 'refs/heads/staging'
       run: |
         echo "Deploying STAGING with IMAGE=$IMAGE"
+        
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml \
+          | kubectl apply -n staging -f -
 
-        # Apply manifest
-        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
+        echo "Waiting for Deployment to appear..."
+        sleep 5
 
-        echo "Waiting for Deployment object to appear..."
-        for i in {1..20}; do
-          kubectl get deployment nginx-staging -n staging && break
-          sleep 2
-        done
-
-        echo "Waiting for rollout..."
         kubectl rollout status deployment/nginx-staging -n staging --timeout=120s
 
-        kubectl get svc -n staging
+    # --------------------------- DEPLOY PROD ------------------------------
 
-    # ------------------------------------------------------------
-    # 9. Deploy to PROD on 'main' branch
-    # ------------------------------------------------------------
     - name: Deploy to PROD
       if: github.ref == 'refs/heads/main'
       run: |
         echo "Deploying PROD with IMAGE=$IMAGE"
 
-        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml \
+          | kubectl apply -n prod -f -
 
-        echo "Waiting for Deployment object to appear..."
-        for i in {1..20}; do
-          kubectl get deployment nginx-prod -n prod && break
-          sleep 2
-        done
+        echo "Waiting for Deployment to appear..."
+        sleep 5
 
-        echo "Waiting for rollout..."
         kubectl rollout status deployment/nginx-prod -n prod --timeout=120s
-
-        kubectl get svc -n prod
-
