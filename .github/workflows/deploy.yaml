@@ -5,75 +5,92 @@ on:
     branches:
       - staging
       - main
-      - prod
 
 env:
   PROJECT_ID: sanguine-rhythm-477418-t9
   REGION: us-east4
   REPO: nginx-gke-repo
   CLUSTER: nginx-gke-cicd
-  USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
 
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest
-
     permissions:
       contents: read
-      id-token: write
+      id-token: write     # REQUIRED FOR OIDC
+
+    runs-on: ubuntu-latest
 
     steps:
-    # Checkout
-    - name: Checkout
-      uses: actions/checkout@v4
 
-    # Auth to GCP
-    - name: Authenticate to GCP
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Authenticate to Google Cloud
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-    # Install gcloud + plugin
-    - name: Set up gcloud
+    - name: Install gcloud & GKE auth plugin
       uses: google-github-actions/setup-gcloud@v2
+      with:
+        install_components: gke-gcloud-auth-plugin
 
-    - name: Install GKE auth plugin
-      run: gcloud components install gke-gcloud-auth-plugin --quiet
-
-    # Docker login
     - name: Configure Docker auth
       run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 
-    # Build + tag image
-    - name: Build image
+    # --------------------------- BUILD IMAGE ---------------------------
+
+    - name: Build Docker image
       run: |
-        IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:${GITHUB_SHA:0:7}"
+        IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
         echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-        docker build -t $IMAGE ./app
+        docker build -t "$IMAGE" ./app
 
-    # Push image
     - name: Push image
-      run: docker push $IMAGE
+      run: docker push "$IMAGE"
 
-    # Connect to GKE
-    - name: Get GKE credentials
+    # --------------------------- CONNECT TO GKE ---------------------------
+
+    - name: Get GKE Credentials
       run: |
-        gcloud container clusters get-credentials $CLUSTER \
-          --region $REGION
+        gcloud container clusters get-credentials "$CLUSTER" \
+          --region "$REGION"
+      env:
+        USE_GKE_GCLOUD_AUTH_PLUGIN: True
 
-    # Deploy to Staging
-    - name: Deploy to Staging
+    - name: Ensure namespaces exist
+      run: |
+        kubectl create ns staging --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create ns prod --dry-run=client -o yaml | kubectl apply -f -
+
+    # --------------------------- DEPLOY STAGING ---------------------------
+
+    - name: Deploy to STAGING
       if: github.ref == 'refs/heads/staging'
       run: |
-        kubectl apply -f k8s/namespaces/staging.yaml
-        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
-        kubectl -n staging rollout status deploy/nginx-staging --timeout=90s
+        echo "Deploying STAGING with IMAGE=$IMAGE"
+        
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml \
+          | kubectl apply -n staging -f -
 
-    # Deploy to Prod (for BOTH main and prod branch)
-    - name: Deploy to Prod
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod'
+        echo "Waiting for Deployment to appear..."
+        sleep 5
+
+        kubectl rollout status deployment/nginx-staging -n staging --timeout=120s
+
+    # --------------------------- DEPLOY PROD ------------------------------
+
+    - name: Deploy to PROD
+      if: github.ref == 'refs/heads/main'
       run: |
-        kubectl apply -f k8s/namespaces/prod.yaml
-        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
-        kubectl -n prod rollout status deploy/nginx-prod --timeout=120s
+        echo "Deploying PROD with IMAGE=$IMAGE"
+
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml \
+          | kubectl apply -n prod -f -
+
+        echo "Waiting for Deployment to appear..."
+        sleep 5
+
+        kubectl rollout status deployment/nginx-prod -n prod --timeout=120s
+
