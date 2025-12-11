@@ -80,6 +80,11 @@ jobs:
         gcloud container clusters get-credentials "$CLUSTER" --region "$REGION"
         kubectl get nodes --request-timeout=20s
 
+    - name: Ensure namespaces exist
+      run: |
+        kubectl get ns staging || kubectl create ns staging
+        kubectl get ns prod || kubectl create ns prod
+
     # ------------------------------------------------------------
     # 8. Deploy to STAGING on 'staging' branch
     # ------------------------------------------------------------
