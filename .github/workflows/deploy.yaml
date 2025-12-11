@@ -1,0 +1,55 @@
+name: CI-CD to GKE
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+env:
+  PROJECT_ID: sanguine-rhythm-477418-t9
+  REGION: us-east4
+  REPO: nginx-gke-repo
+  CLUSTER: nginx-gke-cicd
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Authenticate to GCP (Workload Identity Federation)
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+    - name: Configure gcloud
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker auth
+      run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+    - name: Build Docker image
+      run: |
+        IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/nginx:$(git rev-parse --short HEAD)"
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+        docker build -t $IMAGE ./app
+
+    - name: Push image
+      run: docker push $IMAGE
+
+    - name: Get GKE credentials
+      run: gcloud container clusters get-credentials $CLUSTER --region $REGION
+
+    - name: Deploy to Staging
+      if: github.ref == 'refs/heads/staging'
+      run: |
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
+
+    - name: Deploy to Prod
+      if: github.ref == 'refs/heads/main'
+      run: |
+        sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
