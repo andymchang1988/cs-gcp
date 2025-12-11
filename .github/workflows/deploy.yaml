@@ -84,6 +84,15 @@ jobs:
         USE_GKE_GCLOUD_AUTH_PLUGIN=True \
         gcloud container clusters get-credentials $CLUSTER --region $REGION
         ls -la ~/.kube || true
+   
+    # -----------------------------------------
+    # 8a. yq INSTALL
+    # -----------------------------------------
+    - name: Install yq v4 (correct version)
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+        yq --version
 
     # -----------------------------------------
     # 9. PATCH kubeconfig to REMOVE gke-gcloud-auth-plugin
