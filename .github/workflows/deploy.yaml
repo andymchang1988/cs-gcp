@@ -45,19 +45,27 @@ jobs:
     - name: Push image
       run: docker push $IMAGE
 
-    - name: Enable legacy GKE auth
+    - name: Force legacy GKE authentication
       run: |
-        echo "export USE_GKE_GCLOUD_AUTH_PLUGIN=False" >> $GITHUB_ENV
+        export USE_GKE_GCLOUD_AUTH_PLUGIN=False
+        gcloud config set container/use_application_default_credentials false
 
-    - name: Get GKE credentials
-      run: gcloud container clusters get-credentials $CLUSTER --region $REGION
+    - name: Get GKE credentials (legacy mode)
+      run: |
+        USE_GKE_GCLOUD_AUTH_PLUGIN=False \
+        gcloud container clusters get-credentials $CLUSTER --region $REGION
 
     - name: Deploy to Staging
       if: github.ref == 'refs/heads/staging'
       run: |
+        # Remove plugin-based exec from kubeconfig
+        sed -i 's/gke-gcloud-auth-plugin/gcloud/g' ~/.kube/config || true
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/staging.yaml | kubectl apply -f -
 
-    - name: Deploy to Prod
-      if: github.ref == 'refs/heads/main'
+
+    - name: Deploy to Production
+      if: github.ref == 'refs/heads/prod'
       run: |
+        # Remove plugin-based exec from kubeconfig
+        sed -i 's/gke-gcloud-auth-plugin/gcloud/g' ~/.kube/config || true
         sed "s|REPLACE_IMAGE|$IMAGE|" k8s/prod.yaml | kubectl apply -f -
